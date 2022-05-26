@@ -76,6 +76,27 @@ standings = function(df, year, point_for_victory) {
   return(general_stats)
 }
 
+full_time_info = function(d, year) {
+  d = season(d, year)
+  max_goal = max(max(d$agoal), max(d$hgoal))
+  goals_home = c(0:max_goal)
+  goals_away = c(0:max_goal)
+  hm = expand.grid(goal_home = goals_home, goal_away = goals_away)
+  full_time_counts = c()
+  for (i in 1:nrow(hm)) {
+    g_home = hm[i,"goal_home"]
+    g_away = hm[i,"goal_away"]
+    f = d %>%
+      filter(d$agoal == g_away & d$hgoal == g_home)
+    full_time_counts[i] = nrow(f) 
+  }
+  hm$full_time_count = full_time_counts
+  hm <- hm %>%
+    mutate(goal_home = factor(goal_home),
+      goal_away = factor(goal_away, levels=rev(unique(goal_away))))
+  return(hm)
+}
+
 points_progression = function(d, year, point_per_victory) {
   dy = season(d, year)
   dy = dy[order(dy$date, decreasing = FALSE), ]
@@ -106,9 +127,15 @@ pts_win = 2
 d1991 = season(d, year)
 standings1991 = standings(d, year, pts_win)
 pts_progression = points_progression(d, year, pts_win)
+full_time_counts = full_time_info(d, year)
+h_stats = home_stats(d, year, pts_win)
+a_stats = away_stats(d, year, pts_win)
 
-saveRDS(d1991, "data/seriea1991.rds")
-saveRDS(standings1991, "data/seriea1991_standings.rds")
-saveRDS(pts_progression, "data/seriea1991_points_progression.rds")
+saveRDS(d1991, "data/1991.rds")
+saveRDS(standings1991, "data/1991_standings.rds")
+saveRDS(pts_progression, "data/1991_points_progression.rds")
+saveRDS(full_time_counts, "data/1991_full_time.rds")
+saveRDS(h_stats, "data/1991_home_stats.rds")
+saveRDS(a_stats, "data/1991_away_stats.rds")
 
 rm(list=ls())
