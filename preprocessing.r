@@ -7,6 +7,7 @@ season = function(df, year) {
   d = d %>%
     filter(Season == year)
   
+  date = d$Date
   home = d$home
   away = d$visitor
   hgoal = d$hgoal
@@ -14,7 +15,7 @@ season = function(df, year) {
   home_id = as.numeric(as.factor(d$home))
   away_id = as.numeric(as.factor(d$visitor))
   
-  d_season = data.frame(home, away, home_id, away_id, hgoal, agoal)
+  d_season = data.frame(date, home, away, home_id, away_id, hgoal, agoal)
   return(d_season)
 }
 
@@ -75,6 +76,28 @@ standings = function(df, year, point_for_victory) {
   return(general_stats)
 }
 
+points_progression = function(d, year, point_per_victory) {
+  dy = season(d, year)
+  dy = dy[order(dy$date, decreasing = FALSE), ]
+  
+  team_names = unique(dy$home)
+  n_of_teams = length(team_names)
+  pts_progression = data.frame(matrix(ncol=n_of_teams, nrow=(n_of_teams-1)*2))
+  colnames(pts_progression) = team_names
+  for (t in team_names) {
+    team_d = dy %>%
+      filter(home == t | away == t) %>%
+      mutate(at_home=ifelse(home==t, 1, 0)) %>%
+      mutate(goal_diff=ifelse(at_home==1, hgoal - agoal, agoal - hgoal)) %>%
+      mutate(point=ifelse(goal_diff>0, pts_win, ifelse(goal_diff==0, 1, 0)))
+    
+    pts_progression[,t] = cumsum(team_d$point)
+  }
+  return(pts_progression)
+}
+
+# data manipulation and saving
+
 d = engsoccerdata::italy
 
 year = 1991
@@ -82,7 +105,10 @@ pts_win = 2
 
 d1991 = season(d, year)
 standings1991 = standings(d, year, pts_win)
+pts_progression = points_progression(d, year, pts_win)
 
+saveRDS(d1991, "data/seriea1991.rds")
+saveRDS(standings1991, "data/seriea1991_standings.rds")
+saveRDS(pts_progression, "data/seriea1991_points_progression.rds")
 
-
-rm(d)
+rm(list=ls())
