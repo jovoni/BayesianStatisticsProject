@@ -1,0 +1,994 @@
+---
+title: "Bayesian hierarchical model for the prediction of football results"
+author: "Giovanni Santacatterina"
+date: '2022-05-30'
+output: html_document
+---
+
+```{r setup, include=TRUE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning =  FALSE)
+```
+
+## Introduction
+
+Statistical modelling of sport data is a popular topic, especially when we consider football, the most popular sport in the world. What this project tries to accomplish is the replication of the paper "Bayesian hierarchical model for the prediction of football results", written by Gianluca Baio and Marta Blangiardo in 2010. The model tries to predict the goals scored by every team and the data used refers to the Serie A championship of 1991-92.
+
+## Data exploration
+
+The data is obtained from the R package, `engsoccerdata`, which contains many datasets about football championships, European Cup and Champions League matches. More specifically, the `italy` dataset is the that will be used.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(engsoccerdata)
+library(knitr)
+library(magrittr)
+library(loo)
+library(ggplot2)
+library(matrixStats)
+library(forcats)
+library(dplyr)
+library(bayesplot)
+library(tidyverse)
+source("utils.r")
+
+d = engsoccerdata::italy
+colnames(d)[colnames(d) == 'vgoal'] = 'agoal'
+
+knitr::kable(head(d))
+```
+
+We can see that the dataset contains the following information:
+
+* `Date` Date of match
+* `Season` Year in which the season started
+* `home` Home team 
+* `visitor` Visitor team
+* `FT` Full time result
+* `hgoal` Goal scored by home team
+* `vgoal` Goal scored by visitor team
+* `tier` tier of football pyramid: 1 
+
+In order to replicate the original paper we select the 1991 season and we also identify every team with a specific index.
+
+```{r, echo=FALSE}
+d1991 = season(d, 1991)
+knitr::kable(head(d1991))
+```
+
+Let's first explore how the full-time results were distributed throughout the 306 games of the season:
+
+```{r, echo=FALSE, fig.align='center'}
+full_time = readRDS("data/1991_full_time.rds")
+
+full_time_heatmap = ggplot(full_time, aes(goal_home, goal_away, fill=full_time_count)) +
+  geom_tile(color = "white", lwd = 1.5, linetype = 1) +
+  theme_bw() + coord_equal() + guides(fill="none") +
+  geom_text(aes(label=full_time_count), color="black", size=6) + 
+  scale_fill_distiller(palette="Blues", direction=1) + 
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12)) +
+  labs(x="Home goal", y="Away goal") + ggtitle("FT Results Heatmap", subtitle="Full-Time results for Seria A '91 Season")
+
+full_time_heatmap
+rm(full_time_heatmap)
+```
+
+We observe that the most common result was 1-1. Furthermore, if we compare the upper triangular part of the matrix with the lower triangular part, it appears that more goals are scored by home teams, which obviously translates into more wins for home team:
+
+```{r, echo=FALSE, fig.align="center"}
+d1991$diff = d1991$hgoal - d1991$agoal
+d1991 = d1991 %>% mutate(result_type = ifelse(diff > 0, "home_win", ifelse(diff < 0, "away_win", "tie")))
+
+result_type_barplot = ggplot(data=d1991, aes(x=factor(result_type))) + 
+  labs(x="", y="Count") + 
+  guides(fill="none") + 
+  geom_text(stat= "count", aes(label=..count..), vjust=-0.1, size=5) +
+  geom_bar(position="stack", color="deepskyblue4", fill="deepskyblue4") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12)) +
+  ggtitle("Distribution of results type", subtitle = "Count of result type for Serie A '91 Season")  
+
+result_type_barplot
+rm(result_type_barplot)
+```
+
+In a total of 306 games, there were 128 home wins (~42%) and only 67 away wins (~22), which clearly shows that it's easier to win a match when playing in a familiar stadium. This phenomenon is well known, and may arise for different reasons: crowd effects, travel effects, territoriality and many more. 
+We can also visualize this effect by plotting the distribution of the goals scored throughout the season:
+
+```{r, echo=FALSE, out.width='50%'}
+home_goals_dist = ggplot(data=d1991, aes(x=factor(hgoal))) + 
+  geom_bar(position="stack", color="steelblue2", fill="steelblue2") +
+  ggtitle("Home goals distribution", subtitle="Serie A '91") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  labs(x="Goals", y="Count") + guides(fill="none")
+  
+away_goals_dist = ggplot(data=d1991, aes(x=factor(agoal))) + 
+  geom_bar(position="stack", color="steelblue2", fill="steelblue2") +
+  ggtitle("Away goals distribution", subtitle="Seria A '91") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  labs(x="Goals", y="Count") + guides(fill="none")
+
+home_goals_dist
+away_goals_dist
+rm(home_goals_dist, away_goals_dist)
+```
+
+We can also analyze the ratio of home and away goals for every specific team, in order to understand if there is some significant difference among the championship contenders:
+
+```{r, fig.align='center', echo=FALSE}
+home_stats_df = home_stats(d1991, 1991, 2)
+away_stats_df = away_stats(d1991, 1991, 2)
+full_stats = merge(home_stats_df, away_stats_df, by="team") %>% select(team, home_scored, away_scored) %>%
+  mutate(team = as.factor(team)) %>% 
+  mutate(home_ratio = home_scored/(home_scored + away_scored)) %>%
+  reshape2::melt(id=c("team", "home_ratio")) %>% 
+  mutate(team = fct_reorder(team, -home_ratio))
+
+percentage_type_goals_per_team = ggplot(full_stats, aes(fill=variable, x=team, y=value)) +
+  geom_bar(position="fill", stat="identity") + 
+  coord_flip() + 
+  scale_y_continuous(labels=scales::percent) +
+  labs(x="Team", y="Goal scored (%)") +
+  ggtitle("Home goals v. Away goals", subtitle = "Seria A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12)) +
+  guides(fill=guide_legend(title="type"))
+
+percentage_type_goals_per_team
+rm(percentage_type_goals_per_team)
+```
+
+Only three teams (Inter, Atalanta and Roma) scored more away goals than home goals. At the other end of the spectrum there is Hellas Verona, which scored less than 25% of its goals when playing away from home.
+
+However, it is also well known that the "home factor" becomes less determining whenever the quality difference between the opposing teams increases. A high quality team usually performs well against a low quality team, even when playing away. Hence, the overall quality of a team plays a significant role in the performance.
+
+```{r, out.width='50%', echo=FALSE}
+standings1991 = readRDS("data/1991_standings.rds")
+
+best_attack_plot = ggplot(data=standings1991, aes(x=reorder(team, scored), y=scored, fill=scored)) +
+  geom_bar(stat="identity") + 
+  scale_fill_gradient(low="steelblue1", high="steelblue4") +
+  ggtitle(label="Which team had the best attack?", subtitle = "Serie A '91") +
+  labs(x="", y="Goals scored") + 
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  coord_flip() + guides(fill="none")
+
+worst_defense_plot = ggplot(data=standings1991, aes(x=reorder(team, -conceded), y=conceded, fill=conceded)) +
+  geom_bar(stat="identity") + 
+  scale_fill_gradient(low="steelblue1", high="steelblue4") +
+  ggtitle(label="Which team had the best defense?", subtitle = "Serie A '91") +
+  labs(x ="",y="Goals conceded") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  coord_flip() + guides(fill="none")
+
+best_attack_plot
+worst_defense_plot
+
+rm(best_attack_plot, worst_defense_plot)
+```
+
+Teams like Milan, Juventus and Torino had both a great attack and a great defense, while others, such as Ascoli and Hellas Verona, had the worst performances both in terms of goals scored and goals conceded. Furthermore, we can also notice the exceptional case of the Foggia team, which had the second best attack but also the second worst defense. This suggests that every team has an inherent attack and defense ability.
+
+## The model
+
+After the exploratory analysis, let's describe the model proposed by Baio and and Blangiardo and also the championship under study.
+
+The league is made by a total of $T=18$ teams, playing each other twice (one at home and one away). Hence, the total number of matches is $17*18 = 306$; every match is denoted by the index $g$ and the goals scored by the home team and by the away team during the $g$-th match are represented by $y_{g1}$ and $y_{g2}$. Every match does also have two nested indexes $h(g)$ and $a(g)$ which denotes the index of the team playing the $g$-th match at home and away, respectively.
+
+### Model 1
+
+The vector of observed counts $y = (y_{g1}, y_{g2})$, i.e. the goals scored in a given match, is modeled as independent Poisson:
+
+$$ 
+  y_{gj} | \theta_{gj} \sim \text{Poisson}(\theta_{gj}) 
+$$
+where the parameters $\theta = (\theta_{g1}, \theta_{g2})$ represent the scoring intensity in the $g$-th game for the home team ($j$=1) and away team($j$=2).
+These parameters tries to capture how likely will be for the two teams to score goals. For a specific team this will depend on the inherent quality of its attacking phase and on the inherent quality of the defensive phase of the opponent. Furthermore, the home team will have the addition of the parameter $home$, representing the advantage of the hoisting team. This effect is considered constant for every team and throughout the season. 
+
+$$
+  \text{log}\theta_{g1} = home + att_{h(g)} + def_{a(g)}\\
+  \text{log}\theta_{g2} = att_{a(g)} + def_{h(g)}
+$$
+Since we are using a Bayesian approach, we have to specify the prior distributions for every parameter in the model.
+For the $home$ effect we assume a standard flat prior, and we stress again that is considered fixed and equal for every team.
+
+$$
+  home \sim \text{Normal}(0, 10000)
+$$
+On the other hand, every team will have a specific attack and defense effect, modeled as exchangeable from a common distribution. Hence, for each $t = 1, ..., T$, we have:
+
+$$
+  att_t \sim \text{Normal}(\mu_{att}, \sigma_{att})\\
+  def_t \sim \text{Normal}(\mu_{def}, \sigma_{def})
+$$
+We also impose a constraint on the team-specific parameters. More specifically, we use a sum-to-zero constraint, i.e:
+
+$$
+  \sum_{t=1}^T att_t = 0 \hspace{5mm} \sum_{t=1}^T def_t = 0
+$$
+Finally, we assume flat prior distributions also for the hyperparameters:
+
+$$
+  \mu_{att} \sim \text{Normal}(0,10000), \hspace{5mm} \mu_{def} = \text{Normal}(0,10000)\\
+  \sigma_{att} \sim \text{InvGamma}(0.1,0.1), \hspace{5mm} \sigma_{def} \sim \text{InvGamma}(0.1,0.1)  
+$$
+
+### Model 2
+
+When using Bayesian hierarchical models a possible problem that might arise is the $overshrinkage$, under which some of the extreme occurrences tend to be pulled towards the mean of the overall observations. In our specific case it would translate to underestimating the performances of the top teams and overestimating the ones of the worst teams. Moreover, our exploratory analysis clearly showed that the attack and defense ability of a team competing for the champions can be extremely different when compared to the ones of a team fighting for not being relegated. Hence, drawing attack and defense propensities from a common process might not be enough in order to capture the aforementioned differences. Hence, a more complex model for these parameters is proposed.
+
+The assumptions made for the scoring intensities $\theta_{gj}$ and for the $home$ effect remain unchanged, while for the attack and defense propensities we assume three different generating mechanism: one for the top teams, one for the mid-table teams and one for for the bottom-table teams.
+Every team $t$ will have two latent variables $grp^{att}(t)$ and $grp^{def}(t)$ which can take the values 1, 2, or 3, which identify whether the attack/defense performance is in the bottom-, mid- or top tier, respectively. These are given suitable categorical distributions, which will depend on two vectors of prior probabilities:
+
+$$
+  \pi^{att} = (\pi_{1t}^{att}, \pi_{2t}^{att}, \pi_{3t}^{att}) \hspace{10mm} \pi^{def} = (\pi_{1t}^{def}, \pi_{2t}^{def}, \pi_{3t}^{def})   
+$$
+
+These vectors represent the probability of each team pertaining to a specific category, and one can either model them in terms of a Dirichlet distribution with parameters (1,1,1) for minimally informative models or maybe introduce some prior information (e.g how every team performed in the past years).
+
+The attack and defense effects are then modeled as follows:
+
+$$
+  att_t = \sum_{k=1}^3 \pi^{att}_{t,k} \times \text{nct}(\mu^{att}_k, \sigma^{att}_k, \nu=4), \hspace{10mm} def_t = \sum_{k=1}^3 \pi^{def}_{t,k} \times \text{nct}(\mu^{def}_k, \sigma^{def}_k, \nu=4),
+$$
+where $\mu^{att}_k$ and $\sigma^{att}_k$ are the mean and the variance of the attack and defense effects for the three categories $k=1,2,3$.
+
+## Implementation and results
+
+Now that the models have been presented theoretically, they can be implemented using the `rstan` package and can be fitted using Hamiltonian Monte Carlo (HMC).
+
+### Parameters Results
+
+The first aim of the modeling is the estimation of the main effects we used to estimate the number of goals scored per match.
+
+#### Model 1
+
+As suggested in the paper by Baio and Blangiardo we modeled the parameters using non-informative priors:
+
+$$
+home \sim \text{Normal}(0, 10000)\\
+\mu_{att} \sim \text{Normal}(0, 10000) \hspace{10mm} \mu_{def} \sim \text{Normal}(0, 10000)\\
+\sigma_{att} \sim \text{InvGamma}(0.1, 0.1) \hspace{10mm} \sigma_{def} \sim \text{InvGamma}(0.1, 0.1)
+$$
+
+**Home effect**
+
+```{r, echo=FALSE}
+model_1_fit = readRDS("models/model_1_fit_1991.rds")
+
+summary_model_1_home = rstan::summary(model_1_fit, pars=c("home"))
+summary_model_1_home_df = as.data.frame(summary_model_1_home$summary) %>%
+                                select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat))
+rownames(summary_model_1_home_df) = c("Home")
+colnames(summary_model_1_home_df) = c("Mean", "2.5%", "Median", "97.5%")
+kable(summary_model_1_home_df)
+rm(summary_model_1_home, summary_model_1_home_df)
+```
+
+**Attack effect**
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+summary_model_1_att = rstan::summary(model_1_fit, pars=c("att"))
+summary_model_1_att_df = as.data.frame(summary_model_1_att$summary) %>%
+                                select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat))
+rownames(summary_model_1_att_df) = c(sort(unique(d1991$home)))
+colnames(summary_model_1_att_df) = c("Mean", "2.5%", "Median", "97.5%")
+
+kable(summary_model_1_att_df)
+
+att_intervals_plot = mcmc_intervals(model_1_fit, regex_pars = "^att\\[") +
+  scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) +
+  ggtitle("Attack effects")
+att_intervals_plot
+
+rm(summary_model_1_att, summary_model_1_att_df)
+```
+
+**Defense Effect**
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+summary_model_1_def = rstan::summary(model_1_fit, pars=c("def"))
+summary_model_1_def_df = as.data.frame(summary_model_1_def$summary) %>%
+                                select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat))
+rownames(summary_model_1_def_df) = c(sort(unique(d1991$home)))
+colnames(summary_model_1_def_df) = c("Mean", "2.5%", "Median", "97.5%")
+
+kable(summary_model_1_def_df)
+def_intervals_plot = mcmc_intervals(model_1_fit, regex_pars = "^def\\[") +
+  scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) +
+  ggtitle("Defense effects")
+def_intervals_plot
+
+remove(model_1_fit)
+rm(summary_model_1_def, summary_model_1_def_df)
+```
+
+The results obtained are all similar to the one reported by Baio and Blangiardo.
+The home effect is positive and this was expected since we knew that playing at home is usually and advantage. Milan, Foggia and Napoli, the top 3 scorers of the championship, are also the one who have the highest attack effect; similarly, Ascoli, Foggia and Hellas Verona, who expressed the worst defensive phase during the year, are also the ones with the highest defensive effect (a high defensive effect translates into more goal for the opposing team).
+
+#### Model 2
+
+The second model tries to obtain a "deeper" understanding of how all the teams will perform during the year. Removing the assumption of a common distribution for the attack and defense effects removes the $overshrinkage$ problem but also raises significantly the number of parameters. In this case, using flat prior distribution is not feasible, since the HMC algorithm would not converge. In the previous model, for example, we never noticed extreme values in the effects (they all are between -1 and 1) even though the prior had a huge variance. Hence, in order to let the HMC algorithm converge, more informative priors are used.
+
+Baio and Blangiardo assume that top tier teams, with high propensity at scoring and low propensity at conceding, should have a positive (negative) value for the attack (defense) effect. On the other hand, bottom-tier teams, should show the opposite behavior, i.e. a negative (positive) value for the attack (defense) effect. 
+
+The priors are specified following this idea, but their location parameter are changed according to the aforementioned considerations:
+
+* Bottom teams
+
+$$
+  \mu^{att}_{bottom} \sim \text{truncNormal}(0,1,-3,0) \hspace{10mm} \mu^{def}_{bottom} \sim \text{truncNormal}(0,1,0,3)\\
+  \sigma^{att}_{bottom} \sim \text{invGamma}(1,1) \hspace{10mm} \sigma^{def}_{bottom} \sim \text{invGamma}(1,1)
+$$
+
+* Middle teams
+
+$$
+  \mu^{att}_{middle} \sim \text{Normal}(0,1) \hspace{10mm} \mu^{def}_{middle} \sim \text{Normal}(0,1)\\
+  \sigma^{att}_{middle} \sim \text{invGamma}(1,1) \hspace{10mm} \sigma^{def}_{middle} \sim \text{invGamma}(1,1)
+$$
+
+* Top teams
+
+$$
+  \mu^{att}_{top} \sim \text{truncNormal}(0,1,0,3) \hspace{10mm} \mu^{def}_{top} \sim \text{truncNormal}(0,1,-3,0)\\
+  \sigma^{att}_{top} \sim \text{invGamma}(1,1) \hspace{10mm} \sigma^{def}_{top} \sim \text{invGamma}(1,1)
+$$
+
+Moreover, Baio and Blangiardo proposes the possibility to add prior information also on the Dirichlet distributions for the $\pi$ vectors. In a football championship is usually a very special case to observe a complete change in performance by a team with the respect to its own performances of the past years; for example, if Juventus wins the championship in a specific year, it is very unlikely that the next year would struggle for a good placement, and the same can be said for bottom-tier teams. Hence, the performances of the previous years were considered to build the $pi$ vectors. For each team we counted how many times in the previous 5 years they were in the top, middle or bottom part of the table with respect to goal scored and goal conceded.
+
+The following plots show the posterior probability that each team belongs in one of the three groups:
+
+```{r, echo=FALSE, out.width='50%'}
+model_2_fit = readRDS("models/model_2_fit_1991.rds")
+
+summary_model_2_rank_att = rstan::summary(model_2_fit, pars=c("pi_attack"))
+rank_att_df = as.data.frame(summary_model_2_rank_att$summary) %>%
+  select(-c(se_mean))
+
+summary_model_2_rank_def = rstan::summary(model_2_fit, pars=c("pi_defense"))
+rank_def_df = as.data.frame(summary_model_2_rank_def$summary) %>%
+  select(-c(se_mean))
+
+teams = c()
+types = c()
+for (t in c(sort(unique(d1991$home)))) {
+    teams = append(teams, c(t,t,t))
+    types = append(types, c("Bottom", "Mid", "Top"))
+}
+
+
+rank_att_df$team = teams
+rank_att_df$type = types
+rank_def_df$team = teams
+rank_def_df$type = types
+
+rank_att_df %>%
+  select(c("type", "team", "mean")) %>%
+  ggplot(aes(fill=type, y=mean, x=team)) + 
+  geom_bar(position="fill", stat="identity") + 
+  ggtitle("Attack Ranking", subtitle = "Serie A '91") + 
+  labs(x = "Team", y="Posterior prob") +
+  theme(legend.position="top", plot.title=element_text(size=18), legend.text = element_text(size=12),
+        axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  coord_flip() -> rank_att_plot
+
+rank_def_df %>%
+  select(c("type", "team", "mean")) %>%
+  ggplot(aes(fill=type, y=mean, x=team)) + 
+  geom_bar(position="fill", stat="identity") + 
+  ggtitle("Defense Ranking", subtitle = "Serie A '91") + 
+  labs(x = "Team", y="Posterior prob") +
+  theme(legend.position="top", plot.title=element_text(size=18), legend.text = element_text(size=12),
+        axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  coord_flip() -> rank_def_plot
+
+rank_att_plot
+rank_def_plot
+
+rm(teams, types, rank_def_plot, rank_att_plot, rank_att_df, rank_def_df)
+rm(summary_model_2_rank_att, summary_model_2_rank_def)
+```
+
+**Home effect**
+
+```{r, echo=FALSE}
+summary_model_2_home = rstan::summary(model_2_fit, pars=c("home"))
+summary_model_2_home_df = as.data.frame(summary_model_2_home$summary) %>%
+                                select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat))
+rownames(summary_model_2_home_df) = c("Home")
+colnames(summary_model_2_home_df) = c("Mean", "2.5%", "Median", "97.5%")
+kable(summary_model_2_home_df)
+rm(summary_model_2_home, summary_model_2_home_df)
+```
+
+**Attack effect**
+
+```{r, echo=FALSE, fig.align='center'}
+summary_model_2_att = rstan::summary(model_2_fit, pars=c("att"))
+summary_model_2_att_df = as.data.frame(summary_model_2_att$summary) %>%
+                                select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat))
+rownames(summary_model_2_att_df) = c(sort(unique(d1991$home)))
+colnames(summary_model_2_att_df) = c("Mean", "2.5%", "Median", "97.5%")
+
+kable(summary_model_2_att_df)
+att_intervals_plot = mcmc_intervals(model_2_fit, regex_pars = "^att\\[") +
+  scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) +
+  ggtitle("Attack effects")
+
+att_intervals_plot
+
+rm(summary_model_2_att, summary_model_2_att_df)
+```
+
+**Defense effect**
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center'}
+summary_model_2_def = rstan::summary(model_2_fit, pars=c("def"))
+summary_model_2_def_df = as.data.frame(summary_model_2_def$summary) %>%
+                                select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat))
+rownames(summary_model_2_def_df) = c(sort(unique(d1991$home)))
+colnames(summary_model_2_def_df) = c("Mean", "2.5%", "Median", "97.5%")
+
+kable(summary_model_2_def_df)
+def_intervals_plot = mcmc_intervals(model_2_fit, regex_pars = "^def\\[") +
+  scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) +
+  ggtitle("Defense effects")
+def_intervals_plot
+
+
+
+rm(summary_model_2_def, summary_model_2_def_df)
+rm(model_2_fit)
+```
+
+The results are similar as the ones obtained using model 1. However, the values are more "extreme": the attack effects for the best scorers (Milan, Foggia and Napoli) are now higher and the same apply to the defense effects values of the teams that conceded more goals (Ascoli, Foggia and Hellas Verona). This is in line with the expectations since we expected Model 2 to be able to not underestimate (overestimate) very good (bad) performances.
+Furthermore, the home effect is once again positive, but it has a lower value; this was also expected since we noticed in the preliminary analysis that the inherent differences between teams reduces the advantage that a weak team might gain when playing at home against a strong one.
+
+## Posterior predictive results
+
+The package `rstan` allow us not only to study the information obtained about the model parameters, but also to check if replicated data under the model look similar to observed data. This is possible beacause we can draw simulated values from the posterior predictive distribution.  
+
+### Goal prediction
+
+In our specific case, this means simulating home goals and away goals; after that we can check if the dsitribution of simulated data shows any discrepancy with respect to the distribution of observed data.
+
+#### Model 1
+
+```{r, echo=FALSE, out.width='50%'}
+goal_home_sim_1 = readRDS("data_sim/1991_goal_home_sim_v1.rds")
+goal_away_sim_1 = readRDS("data_sim/1991_goal_away_sim_v1.rds")
+
+ppc_home = ppc_bars(d1991$hgoal, goal_home_sim_1[2000:4000,]) +
+  ggtitle("PPC - Home goals", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), 
+        plot.subtitle=element_text(size=14), axis.text=element_text(size=12),
+        legend.position="top", legend.text=element_text(size=12)) +
+  xlab("Number of home goals")
+
+ppc_away = ppc_bars(d1991$agoal, goal_away_sim_1[2000:4000,]) + 
+  ggtitle("PPC - Away goals", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), 
+        plot.subtitle=element_text(size=14), axis.text=element_text(size=12),
+        legend.position="top", legend.text=element_text(size=12)) +
+  xlab("Number of away goals")
+
+ppc_home
+ppc_away
+
+rm(ppc_home, ppc_away)
+```
+
+***
+
+```{r, echo=FALSE, out.width='50%'}
+y_rep_home = colMeans(goal_home_sim_1)
+var_home = sqrt(y_rep_home)
+std_res_home = (d1991$hgoal - y_rep_home) / var_home
+
+y_rep_away = colMeans(goal_away_sim_1)
+var_away = sqrt(y_rep_away)
+std_res_away = (d1991$agoal - y_rep_away) / var_away
+
+std_res_home_plot = qplot(y_rep_home, std_res_home) +
+  ggtitle("Pearson residual - Home goals", subtitle = "Serie A '91") + 
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  hline_at(2) + hline_at(-2) +
+  labs(x = "mean home goals rep", y = "std res")
+
+std_res_away_plot = qplot(y_rep_away, std_res_away) +
+  ggtitle("Pearson residual - Away goals", subtitle = "Serie A '91") + 
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  hline_at(2) + hline_at(-2) +
+  labs(x = "mean away goals rep", y = "std res")
+
+std_res_home_plot
+std_res_away_plot
+rm(std_res_home_plot, y_rep_home, var_home, std_res_home)
+rm(std_res_away_plot, y_rep_away, var_away, std_res_away)
+```
+
+***
+
+```{r, echo=FALSE, message=FALSE, fig.align='center'}
+ppc_mean_home_per_team = ppc_stat_grouped(
+    d1991$hgoal, 
+    goal_home_sim_1[2000:4000,], 
+    group = d1991$home, stat = "mean"
+  ) + ggtitle("PPC - Home goals per team - Mean", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_mean_away_per_team = ppc_stat_grouped(
+    d1991$agoal, 
+    goal_away_sim_1[2000:4000,], 
+    group = d1991$visitor, stat = "mean"
+  ) + ggtitle("PPC - Away goals per team - Mean", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_mean_home_per_team
+```
+
+***
+
+```{r, fig.align='center'}
+ppc_mean_away_per_team
+
+rm(ppc_mean_away_per_team, ppc_mean_home_per_team)
+```
+
+***
+
+```{r, echo=FALSE, message=FALSE, fig.align='center'}
+ppc_std_home_per_team = ppc_stat_grouped(
+    d1991$hgoal, 
+    goal_home_sim_1[2000:4000,], 
+    group = d1991$home, stat = "sd"
+  ) + ggtitle("PPC - Home goals per team - Sd", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_std_away_per_team = ppc_stat_grouped(
+    d1991$agoal, 
+    goal_away_sim_1[2000:4000,], 
+    group = d1991$visitor, stat = "sd"
+  ) + ggtitle("PPC - Away goals per team - Sd", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_std_home_per_team
+```
+
+***
+
+```{r, echo=FALSE, fig.align='center'}
+ppc_std_away_per_team
+
+rm(ppc_std_home_per_team, ppc_std_away_per_team)
+rm(d, goal_away_sim_1, goal_home_sim_1)
+```
+
+
+#### Model 2
+
+```{r, echo=FALSE, out.width='50%'}
+goal_home_sim_2 = readRDS("data_sim/1991_goal_home_sim_v2.rds")
+goal_away_sim_2 = readRDS("data_sim/1991_goal_away_sim_v2.rds")
+
+ppc_home = ppc_bars(d1991$hgoal, goal_home_sim_2[2000:4000,]) +
+  ggtitle("PPC - Home goals", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), 
+        plot.subtitle=element_text(size=14), axis.text=element_text(size=12),
+        legend.position="top", legend.text=element_text(size=12)) +
+  xlab("Number of home goals")
+
+ppc_away = ppc_bars(d1991$agoal, goal_away_sim_2[2000:4000,]) + 
+  ggtitle("PPC - Away goals", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), 
+        plot.subtitle=element_text(size=14), axis.text=element_text(size=12),
+        legend.position="top", legend.text=element_text(size=12)) +
+  xlab("Number of away goals")
+
+ppc_home
+ppc_away
+
+rm(ppc_home, ppc_away)
+```
+
+***
+
+```{r, echo=FALSE, out.width='50%'}
+y_rep_home = colMeans(goal_home_sim_2)
+var_home = sqrt(y_rep_home)
+std_res_home = (d1991$hgoal - y_rep_home) / var_home
+
+y_rep_away = colMeans(goal_away_sim_2)
+var_away = sqrt(y_rep_away)
+std_res_away = (d1991$agoal - y_rep_away) / var_away
+
+std_res_home_plot = qplot(y_rep_home, std_res_home) +
+  ggtitle("Pearson residual - Home goals", subtitle = "Serie A '91") + 
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  hline_at(2) + hline_at(-2) +
+  labs(x = "mean home goals rep", y = "std res")
+
+std_res_away_plot = qplot(y_rep_away, std_res_away) +
+  ggtitle("Pearson residual - Away goals", subtitle = "Serie A '91") + 
+  theme(plot.title=element_text(size=18), axis.title=element_text(size=14), plot.subtitle=element_text(size=14), axis.text=element_text(size=12)) +
+  hline_at(2) + hline_at(-2) +
+  labs(x = "mean away goals rep", y = "std res")
+
+std_res_home_plot
+std_res_away_plot
+rm(std_res_home_plot, y_rep_home, var_home, std_res_home)
+rm(std_res_away_plot, y_rep_away, var_away, std_res_away)
+```
+
+***
+
+```{r, echo=FALSE, message=FALSE, fig.align='center'}
+ppc_mean_home_per_team = ppc_stat_grouped(
+    d1991$hgoal, 
+    goal_home_sim_2[2000:4000,], 
+    group = d1991$home, stat = "mean"
+  ) + ggtitle("PPC - Home goals per team - Mean", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_mean_away_per_team = ppc_stat_grouped(
+    d1991$agoal, 
+    goal_away_sim_2[2000:4000,], 
+    group = d1991$visitor, stat = "mean"
+  ) + ggtitle("PPC - Away goals per team - Mean", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_mean_home_per_team
+```
+
+***
+
+```{r, fig.align='center'}
+ppc_mean_away_per_team
+
+rm(ppc_mean_away_per_team, ppc_mean_home_per_team)
+```
+
+***
+
+```{r, echo=FALSE, message=FALSE, fig.align='center'}
+ppc_std_home_per_team = ppc_stat_grouped(
+    d1991$hgoal, 
+    goal_home_sim_2[2000:4000,], 
+    group = d1991$home, stat = "sd"
+  ) + ggtitle("PPC - Home goals per team - Sd", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_std_away_per_team = ppc_stat_grouped(
+    d1991$agoal, 
+    goal_away_sim_2[2000:4000,], 
+    group = d1991$visitor, stat = "sd"
+  ) + ggtitle("PPC - Away goals per team - Sd", subtitle = "Serie A '91") +
+  theme(plot.title=element_text(size=16), axis.title=element_text(size=12), plot.subtitle=element_text(size=12),
+        legend.position="bottom", legend.text=element_text(size=12)) 
+
+ppc_std_home_per_team
+```
+
+***
+
+```{r, echo=FALSE, fig.align='center'}
+ppc_std_away_per_team
+
+rm(ppc_std_home_per_team, ppc_std_away_per_team)
+rm(d, goal_away_sim_1, goal_home_sim_1)
+```
+
+
+The posterior predictive checks does not show any particular discrepancies between the simulated and the real data. However, in some cases some problems arises. First, the models overestimates the away goals for Hellas Verona, which, we recall, was the team with most extreme difference between goals made at home and away. Second, the standard deviation for Hellas Verona and As Roma are overestimated by our model. 
+
+### Point predictions
+
+As the paper suggests, by having the predictions for the goals made in every match, we are able to predict the full time result for every match and, consequently, the evolution of the ranking table throughout the season. Hence, we can plot the points progression for every team and compare the predictions made by model 1 (red line) and 2 (green line) with respect to the real results (blue line).
+
+```{r, echo=FALSE, fig.align='center', fig.width=20, fig.height=10}
+pts_prog = readRDS("data/1991_points_progression.rds")
+sim_pts_prog_1 = readRDS("data_sim/1991_points_progression_sim_v1.rds")
+sim_pts_prog_2 = readRDS("data_sim/1991_points_progression_sim_v2.rds")
+
+x = c(1:nrow(pts_prog))
+pts_prog$model = "real_values"
+sim_pts_prog_1$model = "model_v1"
+sim_pts_prog_2$model = "model_v2"
+pts_prog$game = x
+sim_pts_prog_1$game = x
+sim_pts_prog_2$game = x
+rm(x)
+
+all_points_progression = rbind(pts_prog, sim_pts_prog_1, sim_pts_prog_2)
+all_points_progression = all_points_progression %>%
+  reshape2::melt(id=c("model", "game"))
+
+all_points_progression %>%
+  ggplot() + 
+  geom_line(aes(x=game, y=value, color=model)) + 
+  facet_wrap(~variable, scales = "free") + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(), strip.text = element_text(size=20),
+    axis.text=element_text(size=18), legend.position="bottom", legend.text=element_text(size=20), 
+    legend.title=element_text(size=20), legend.key.size = unit(3,"line")) -> plot_pts_progression
+
+plot_pts_progression
+
+rm(plot_pts_progression)
+rm(pts_prog, sim_pts_prog_1, sim_pts_prog_2, all_points_progression)
+```
+
+```{r, echo=FALSE}
+home_goal_sim1 = readRDS("data_sim/1991_goal_home_sim_v1.rds")
+away_goal_sim1 = readRDS("data_sim/1991_goal_away_sim_v1.rds")
+
+home_goal_sim2 = readRDS("data_sim/1991_goal_home_sim_v2.rds")
+away_goal_sim2 = readRDS("data_sim/1991_goal_away_sim_v2.rds")
+
+real_season = readRDS("data/1991.rds")
+
+sim_season1 = simulated_season(real_season_df=real_season, sim_goal_home=home_goal_sim1, sim_goal_away=away_goal_sim1)
+sim_season2 = simulated_season(real_season_df=real_season, sim_goal_home=home_goal_sim2, sim_goal_away=away_goal_sim2)
+
+s0 = standings(real_season, 1991, 2)
+my_order = s0$team
+standings(sim_season1, 1991, 2) %>%
+  slice(match(my_order, team)) -> s1
+standings(sim_season2, 1991, 2) %>%
+  slice(match(my_order, team)) -> s2
+
+total_standings = data.frame(
+  Team = s0$team,
+  Pts_real = s0$points,
+  Pts_m1 = s1$points,
+  Pts_m2 = s2$points,
+  Scored_real = s0$scored,
+  Scored_m1 = s1$scored,
+  Scored_m2 = s2$scored,
+  Concede_real = s0$conceded,
+  Concede_m1 = s1$conceded,
+  Concede_m2 = s2$conceded
+)
+
+knitr::kable(total_standings, booktabs=FALSE)
+rm(home_goal_sim1, home_goal_sim2, away_goal_sim1, away_goal_sim2, s0, s1, s2, sim_season1, sim_season2, real_season, total_standings)
+```
+
+The predictions made by the two models are usually very similar, and when they differ significantly, sometimes is the first model the one performing better (e.g Lazio and Napoli), sometimes is the other way around (e.g. Cremonese and Cagliari).
+
+However, we can also compare the two models using predictive information criteria. This can be done using the `loo` package:
+
+
+**Home goals**
+
+```{r, echo=FALSE, warning=FALSE}
+model_1_fit = readRDS("models/model_1_fit_1991.rds")
+model_2_fit = readRDS("models/model_2_fit_1991.rds")
+
+loglik1_home = as.matrix(model_1_fit, pars="log_lik_1")
+loglik2_home = as.matrix(model_2_fit, pars="log_lik_1")
+
+# LOO
+loo1_home = loo(loglik1_home)
+loo2_home = loo(loglik2_home)
+
+loo_diff_home = loo_compare(loo1_home, loo2_home)
+print(loo_diff_home, simplify = FALSE)
+rm(loo1_home, loo2_home, loo_diff_home)
+
+# WAIC
+waic1_home = waic(loglik1_home)
+waic2_home = waic(loglik2_home)
+
+waic_diff_home = loo_compare(waic1_home, waic2_home)
+print(waic_diff_home, simplify = FALSE)
+rm(waic1_home, waic2_home, waic_diff_home)
+
+rm(loglik1_home, loglik2_home)
+```
+
+**Away goals**
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+loglik1_away = as.matrix(model_1_fit, pars="log_lik_2")
+loglik2_away = as.matrix(model_2_fit, pars="log_lik_2")
+
+# LOO
+loo1_away = loo(loglik1_away)
+loo2_away = loo(loglik2_away)
+
+loo_diff_away = loo_compare(loo1_away, loo2_away)
+print(loo_diff_away, simplify = FALSE)
+rm(loo1_away, loo2_away, loo_diff_away)
+
+# WAIC
+waic1_away = waic(loglik1_away)
+waic2_away = waic(loglik2_away)
+
+waic_diff_away = loo_compare(waic1_away, waic2_away)
+print(waic_diff_away, simplify = FALSE)
+rm(waic1_away, waic2_away, waic_diff_away)
+
+rm(model_1_fit, model_2_fit)
+rm(loglik1_away, loglik2_away)
+```
+
+Model 2 is slightly favorite in terms of lower LOOIC for home goals, while for away goals is Model 1 to be favorite, since it shows a lower value both in terms of LOOIC and WAIC.
+
+<!-- ## New Model -->
+
+<!-- **Home effect** -->
+
+<!-- ```{r, echo=FALSE} -->
+<!-- model_3_fit = readRDS("models/model_3_fit_1991.rds") -->
+
+<!-- summary_model_3_home = rstan::summary(model_3_fit, pars=c("home")) -->
+<!-- summary_model_3_home_df = as.data.frame(summary_model_3_home$summary) %>% -->
+<!--                                 select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat)) -->
+<!-- rownames(summary_model_3_home_df) = c(sort(unique(d1991$home))) -->
+<!-- colnames(summary_model_3_home_df) = c("Mean", "2.5%", "Median", "97.5%") -->
+
+<!-- kable(summary_model_3_home_df) -->
+
+<!-- home_intervals_plot = mcmc_intervals(model_3_fit, regex_pars = "^home\\[") + -->
+<!--   scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) + -->
+<!--   ggtitle("Attack effects") -->
+
+<!-- home_intervals_plot -->
+
+<!-- rm(summary_model_3_home, summary_model_3_home_df) -->
+<!-- ``` -->
+
+<!-- **Attack effect** -->
+
+<!-- ```{r, echo=FALSE} -->
+<!-- summary_model_3_att = rstan::summary(model_3_fit, pars=c("att")) -->
+<!-- summary_model_3_att_df = as.data.frame(summary_model_3_att$summary) %>% -->
+<!--                                 select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat)) -->
+<!-- rownames(summary_model_3_att_df) = c(sort(unique(d1991$home))) -->
+<!-- colnames(summary_model_3_att_df) = c("Mean", "2.5%", "Median", "97.5%") -->
+
+<!-- kable(summary_model_3_att_df) -->
+<!-- att_intervals_plot = mcmc_intervals(model_3_fit, regex_pars = "^att\\[") + -->
+<!--   scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) + -->
+<!--   ggtitle("Attack effects") -->
+
+<!-- att_intervals_plot -->
+
+<!-- rm(summary_model_3_att, summary_model_3_att_df) -->
+<!-- ``` -->
+
+<!-- **Defense effect** -->
+
+<!-- ```{r, echo=FALSE, warning=FALSE, fig.align='center'} -->
+<!-- summary_model_3_def = rstan::summary(model_3_fit, pars=c("def")) -->
+<!-- summary_model_3_def_df = as.data.frame(summary_model_3_def$summary) %>% -->
+<!--                                 select(-c(se_mean, sd, "25%", "75%", n_eff, Rhat)) -->
+<!-- rownames(summary_model_3_def_df) = c(sort(unique(d1991$home))) -->
+<!-- colnames(summary_model_3_def_df) = c("Mean", "2.5%", "Median", "97.5%") -->
+
+<!-- def_intervals_plot = mcmc_intervals(model_3_fit, regex_pars = "^def\\[") + -->
+<!--   scale_y_discrete(labels = sort(unique(d1991$home), decreasing = TRUE), limits=rev) + -->
+<!--   ggtitle("Defense effects") -->
+<!-- def_intervals_plot -->
+
+<!-- kable(summary_model_3_def_df) -->
+
+<!-- rm(summary_model_3_def, summary_model_3_def_df) -->
+<!-- rm(model_3_fit) -->
+<!-- ``` -->
+
+
+<!-- ```{r, echo=FALSE, fig.align='center'} -->
+<!-- pts_prog = readRDS("data/1991_points_progression.rds") -->
+<!-- sim_pts_prog_1 = readRDS("data_sim/1991_points_progression_sim_v1.rds") -->
+<!-- sim_pts_prog_2 = readRDS("data_sim/1991_points_progression_sim_v2.rds") -->
+<!-- sim_pts_prog_3 = readRDS("data_sim/1991_points_progression_sim_v3.rds") -->
+
+<!-- x = c(1:nrow(pts_prog)) -->
+<!-- pts_prog$model = "real_values" -->
+<!-- sim_pts_prog_1$model = "model_v1" -->
+<!-- sim_pts_prog_2$model = "model_v2" -->
+<!-- sim_pts_prog_3$model = "model_v3" -->
+<!-- pts_prog$game = x -->
+<!-- sim_pts_prog_1$game = x -->
+<!-- sim_pts_prog_2$game = x -->
+<!-- sim_pts_prog_3$game = x -->
+<!-- rm(x) -->
+
+<!-- all_points_progression = rbind(pts_prog, sim_pts_prog_1, sim_pts_prog_2, sim_pts_prog_3) -->
+<!-- all_points_progression = all_points_progression %>% -->
+<!--   reshape2::melt(id=c("model", "game")) -->
+
+<!-- all_points_progression %>% -->
+<!--   ggplot() +  -->
+<!--   geom_line(aes(x=game, y=value, color=model)) +  -->
+<!--   facet_wrap(~variable, scales = "free") +  -->
+<!--   theme(axis.title.x = element_blank(), axis.title.y = element_blank()) -> plot_pts_progression -->
+
+<!-- plot_pts_progression -->
+
+<!-- rm(plot_pts_progression) -->
+<!-- rm(pts_prog, sim_pts_prog_1, sim_pts_prog_2, sim_pts_prog_3,all_points_progression) -->
+<!-- ``` -->
+
+<!-- **Home goals** -->
+
+<!-- ```{r, echo=FALSE, warning=FALSE} -->
+<!-- library(loo) -->
+<!-- model_1_fit = readRDS("models/model_1_fit_1991.rds") -->
+<!-- model_2_fit = readRDS("models/model_2_fit_1991.rds") -->
+<!-- model_3_fit = readRDS("models/model_3_fit_1991.rds") -->
+
+<!-- loglik1_home = as.matrix(model_1_fit, pars="log_lik_1") -->
+<!-- loglik2_home = as.matrix(model_2_fit, pars="log_lik_1") -->
+<!-- loglik3_home = as.matrix(model_3_fit, pars="log_lik_1") -->
+
+<!-- # LOO -->
+<!-- loo1_home = loo(loglik1_home) -->
+<!-- loo2_home = loo(loglik2_home) -->
+<!-- loo3_home = loo(loglik3_home) -->
+
+<!-- loo_diff_home = loo_compare(loo1_home, loo2_home, loo3_home) -->
+<!-- print(loo_diff_home, simplify = FALSE) -->
+<!-- rm(loo1_home, loo2_home, loo3_home, loo_diff_home) -->
+
+<!-- # WAIC -->
+<!-- waic1_home = waic(loglik1_home) -->
+<!-- waic2_home = waic(loglik2_home) -->
+<!-- waic3_home = waic(loglik3_home) -->
+
+<!-- waic_diff_home = loo_compare(waic1_home, waic2_home, waic3_home) -->
+<!-- print(waic_diff_home, simplify = FALSE) -->
+<!-- rm(waic1_home, waic2_home, waic_diff_home) -->
+
+<!-- rm(loglik1_home, loglik2_home) -->
+<!-- ``` -->
+
+<!-- **Away goals** -->
+
+<!-- ```{r, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE} -->
+<!-- loglik1_away = as.matrix(model_1_fit, pars="log_lik_2") -->
+<!-- loglik2_away = as.matrix(model_2_fit, pars="log_lik_2") -->
+<!-- loglik3_away = as.matrix(model_2_fit, pars="log_lik_2") -->
+
+<!-- # LOO -->
+<!-- loo1_away = loo(loglik1_away) -->
+<!-- loo2_away = loo(loglik2_away) -->
+<!-- loo3_away = loo(loglik3_away) -->
+
+<!-- loo_diff_away = loo_compare(loo1_away, loo2_away, loo3_away) -->
+<!-- print(loo_diff_away, simplify = FALSE) -->
+<!-- rm(loo1_away, loo2_away, loo_diff_away) -->
+
+<!-- # WAIC -->
+<!-- waic1_away = waic(loglik1_away) -->
+<!-- waic2_away = waic(loglik2_away) -->
+<!-- waic3_away = waic(loglik3_away) -->
+
+<!-- waic_diff_away = loo_compare(waic1_away, waic2_away, waic3_away) -->
+<!-- print(waic_diff_away, simplify = FALSE) -->
+<!-- rm(waic1_away, waic2_away, waic_diff_away) -->
+
+<!-- rm(model_1_fit, model_2_fit) -->
+<!-- rm(loglik1_away, loglik2_away) -->
+<!-- ``` -->
+
+## Conclusions
+
+The models implemented are an application of Bayesian hierarchical modelling related to football data, and they try to replicate the work done by Baio and Blangiardo.
+
+The first model, which assumes two conditionally independent Poisson variables for the number of goals scored, produces results that are similar to the one presented in the paper and the posterior predictive checks do not show any discrepancies between simulated data and real one.
+
+The second model had to be slightly changed with respect to the Baio and Blangiardo's one. The main reason was that the HMC algorithm failed to converge due to the larger number of parameters that the more complex model needed. Therefore, more informative priors were employed.
+
+Further improvements could be done by refining the model definition. Some meaningful results could be obtained considering:
+
+* Prior information on the strength of each team
+* Removing the assumption that the $home$ effect is the same for every team (some stadiums are considered as "fortress")
+* Considering the period in which a game is played (injuries, expulsions, European competitions)

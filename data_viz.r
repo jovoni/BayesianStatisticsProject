@@ -1,5 +1,6 @@
 library(ggplot2)
 library(RColorBrewer)
+library(tibble)
 setwd("~/Desktop/UNITS/Bayesian_Statistics/BayesianStatisticsProject")
 
 save_img = function(image_name, image) {
@@ -13,6 +14,8 @@ save_img = function(image_name, image) {
 d = readRDS("data/1991.rds")
 standings = readRDS("data/1991_standings.rds")
 pts_prog = readRDS("data/1991_points_progression.rds")
+sim_pts_prog_1 = readRDS("data_sim/1991_points_progression_sim_v1.rds")
+sim_pts_prog_2 = readRDS("data_sim/1991_points_progression_sim_v2.rds")
 full_time = readRDS("data/1991_full_time.rds")
 #home_stats = readRDS("data/1991_home_stats.rds")
 #away_stats = readRDS("data/1991_away_stats.rds")
@@ -55,6 +58,33 @@ full_time_results_hm = ggplot(full_time, aes(goal_home, goal_away, fill=full_tim
   scale_fill_distiller(palette="Blues", direction=1) + 
   theme(plot.title=element_text(size=24, face="bold"), axis.text=element_text(size=14), axis.title=element_text(size=14), plot.subtitle=element_text(size=20)) +
   labs(x="Home goal", y="Away goal") + ggtitle("Full time results counted", subtitle="Which are the most common results in Serie A 1991-92?")
+
+x = c(1:nrow(pts_prog))
+pts_prog$model = "real_values"
+sim_pts_prog_1$model = "model_v1"
+sim_pts_prog_2$model = "model_v2"
+pts_prog$game = x
+sim_pts_prog_1$game = x
+sim_pts_prog_2$game = x
+
+all_points_progression = rbind(pts_prog, sim_pts_prog_1, sim_pts_prog_2)
+all_points_progression = all_points_progression %>%
+  reshape2::melt(id=c("model", "game"))
+
+all_points_progression %>%
+  ggplot() + geom_line(aes(x=game, y=value, color=model)) + facet_wrap(~variable)
+
+for (t in sort(colnames(pts_prog))) {
+  y_real = pts_prog[[t]]
+  y_v1 = sim_pts_prog_1[[t]]
+  y_v2 = sim_pts_prog_2[[t]]
+  
+  plot(x,y_real,xlim = c(0,34),ylim = c(0,60),type = "l", col="black", main=t, xlab="Games", ylab="Points")
+  lines(x, y_v1, pch=18, col="red", type="l", lwd=2)
+  lines(x, y_v2, pch=18, col="green", type="l", lwd=2)
+  legend(1, 50, legend=c("Real values", "Model v1", "Model v2"),
+         col=c("black", "red", "green"), lty=1:1, lwd=2:2)
+}
 
 png("plots/1991_attack.png", width=1200, height=700)
 best_attack_plot

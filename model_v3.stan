@@ -10,7 +10,7 @@ data {
 }
 
 parameters {
-  real home;
+  vector[T] home;
   vector[T] att_star;
   vector[T] def_star;
   
@@ -18,14 +18,9 @@ parameters {
   real mu_def;
   real<lower=0> sigma_att;
   real<lower=0> sigma_def;
-  //real<lower=0> tau_att;
-  //real<lower=0> tau_def;
 }
 
 transformed parameters {
-  //real sigma_att = inv(tau_att);
-  //real sigma_def = inv(tau_def);
-  
   vector[T] att;
   vector[T] def;
   
@@ -34,15 +29,15 @@ transformed parameters {
 }
 
 model {
-  home ~ normal(0, 10000);
+  for (t in 1:T) {
+    home[t] ~ normal(0, 10);  
+  }
   
-  mu_att ~ normal(0, 10000);
-  mu_def ~ normal(0, 10000);
+  mu_att ~ normal(0, 10);
+  mu_def ~ normal(0, 10);
   
-  sigma_att ~ inv_gamma(0.1, 0.1);
-  sigma_def ~ inv_gamma(0.1, 0.1);
-  //tau_att ~ gamma(0.1, 0.1);
-  //tau_def ~ gamma(0.1, 0.1);
+  sigma_att ~ inv_gamma(1, 1);
+  sigma_def ~ inv_gamma(1, 1);
   
   for (t in 1:T) {
     att_star[t] ~ normal(mu_att, sigma_att);
@@ -50,7 +45,7 @@ model {
   }
   
   for (n in 1:N) {
-    y1[n] ~ poisson_log(home + att[hometeam[n]] + def[awayteam[n]]);
+    y1[n] ~ poisson_log(home[hometeam[n]] + att[hometeam[n]] + def[awayteam[n]]);
     y2[n] ~ poisson_log(att[awayteam[n]] + def[hometeam[n]]);
   }
 }
@@ -63,8 +58,8 @@ generated quantities {
   vector[N] log_lik_2;
   
   for (n in 1:N) {
-    log_lik_1[n] = poisson_log_lpmf(y1[n] | home + att[hometeam[n]] + def[awayteam[n]]);
-    y1_new[n] = poisson_log_rng(home + att[hometeam[n]] + def[awayteam[n]]);
+    log_lik_1[n] = poisson_log_lpmf(y1[n] | home[hometeam[n]] + att[hometeam[n]] + def[awayteam[n]]);
+    y1_new[n] = poisson_log_rng(home[hometeam[n]] + att[hometeam[n]] + def[awayteam[n]]);
     
     log_lik_2[n] = poisson_log_lpmf(y2[n] | att[awayteam[n]] + def[hometeam[n]]);
     y2_new[n] = poisson_log_rng(att[awayteam[n]] + def[hometeam[n]]);
